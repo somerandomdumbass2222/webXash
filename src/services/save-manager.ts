@@ -1,4 +1,5 @@
 import { createStore, get, set, values, type UseStore } from 'idb-keyval';
+import { unzipSync, zipSync } from 'fflate';
 import type { Xash3D } from 'xash3d-fwgs';
 import { useXashStore } from '/@/stores/store.ts';
 
@@ -153,6 +154,89 @@ class SaveManager {
       gameId,
       data: saves,
     });
+  }
+
+  public get isRunning(): boolean {
+    return !!this._xash;
+  }
+
+  /** Bundle every stored save into a zip: <gameId>/<save name>. */
+  public async exportAllAsZip(): Promise<Uint8Array | null> {
+    if (this._xash) await this.onSave(); // grab anything the game just wrote
+    const entries = await this.listSaves();
+    const files: Record<string, Uint8Array> = {};
+    for (const entry of entries) {
+      for (const save of entry.data) {
+        if (save?.name && save?.data?.length) {
+          files[`${entry.gameId}/${save.name}`] = save.data;
+        }
+      }
+    }
+    if (Object.keys(files).length === 0) return null;
+    return zipSync(files, { level: 0 });
+  }
+
+  /**
+   * Import loose .sav files and/or zips (including ones made by exportAllAsZip).
+   * Loose files go to xash-custom-saves, which get copied into any game launched.
+   * Returns the number of saves imported.
+   */
+  public async importFiles(files: File[]): Promise<number> {
+    const byGame = new Map<string, File[]>();
+    let count = 0;
+    const loose: File[] = [];
+
+    for (const file of files) {
+      if (file.name.toLowerCase().endsWith('.zip')) {
+        const unzipped = unzipSync(new Uint8Array(await file.arrayBuffer()));
+        for (const [path, data] of Object.entries(unzipped)) {
+          if (!path.toLowerCase().endsWith('.sav')) continue;
+          const parts = path.split('/').filter(Boolean);
+          const name = parts[parts.length - 1];
+          // Prefer the game folder from our own export format; otherwise "custom".
+          const gameId = parts.length >= 2 && !parts.includes('save')
+            ? parts[0]
+            : parts.length >= 3 && parts[parts.length - 2] === 'save'
+              ? parts[parts.length - 3]
+              : CUSTOM_SAVES_NAME;
+          const f = new File([data], name);
+          byGame.set(gameId, [...(byGame.get(gameId) ?? []), f]);
+        }
+      } else {
+        loose.push(file);
+      }
+    }
+    if (loose.length) byGame.set(CUSTOM_SAVES_NAME, [...(byGame.get(CUSTOM_SAVES_NAME) ?? []), ...loose]);
+
+    for (const [gameId, gameFiles] of byGame) {
+      const existing = await get<SaveEntry>(gameId, this._savesStore);
+      let saves: IDBSaveGame[] = existing?.data ?? [];
+      for (const f of gameFiles) {
+        saves = this._upsertSave(saves, {
+          id: crypto.randomUUID(),
+          name: f.name,
+          data: new Uint8Array(await f.arrayBuffer()),
+          lastModified: Date.now(),
+        });
+        count++;
+      }
+      await set(gameId, { gameId, data: saves }, this._savesStore);
+    }
+
+    // If a game is already running, push them into its filesystem so they show up in Load Game.
+    if (this._xash && count > 0) {
+      const store = useXashStore();
+      const gameId =
+        store.customGameArg === DEFAULT_GAME_DIR
+          ? store.selectedGame.name
+          : store.customGameArg;
+      try {
+        await this.transferSavesToGame(gameId);
+      } catch (e) {
+        console.warn('Could not copy imported saves into running game', e);
+      }
+    }
+    return count;
   }
 
   public async listSaves(): Promise<SaveEntry[]> {
