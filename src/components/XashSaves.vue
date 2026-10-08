@@ -12,6 +12,7 @@
     </div>
   </div>
   <div class="window" name="Saves List">
+    <XashSaveTransfer />
     <div class="save-controls">
       <button class="save-controls__add" @click="addSave">Add</button>
       <button
@@ -57,6 +58,7 @@
   import { type IDBSaveGame } from '/@/services/save-manager.ts';
   import { SaveManager } from '/@/services';
   import InfoIcon from './InfoIcon.vue';
+  import XashSaveTransfer from './XashSaveTransfer.vue';
 
   const store = useXashStore();
 
@@ -90,12 +92,13 @@
     uploadElement.value = document.createElement('input');
     uploadElement.value.type = 'file';
     uploadElement.value.multiple = true;
+    uploadElement.value.accept = '.sav,.zip';
     uploadElement.value.click();
     uploadElement.value.onchange = async (event: Event) => {
       let files = (event.target as HTMLInputElement).files;
       if (!files) return;
       const filesArr = Array.from(files);
-      await SaveManager.addCustomSaves(filesArr);
+      await SaveManager.importFiles(filesArr);
       await store.refreshSavesList();
     };
   };
